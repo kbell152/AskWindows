@@ -1,11 +1,12 @@
 # AskWindows — Python dependencies
 # Install with:  pip install -r requirements.txt
 
-customtkinter>=5.2.2      # Modern themed tkinter widgets
-requests>=2.31.0          # HTTP calls to the Cloudflare Worker
-SpeechRecognition>=3.10.0 # Microphone → text (wraps Google Web Speech)
-pyaudio>=0.2.13           # Microphone audio capture (used by SpeechRecognition)
-pyttsx3>=2.90             # Text-to-speech via Windows SAPI
+customtkinter>=5.2.2
+requests>=2.31.0
+SpeechRecognition>=3.10.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+pyttsx3>=2.90
 
 # Optional — only needed if you set USE_OFFLINE = True in mic_input.py:
 # vosk>=0.3.45            # Offline speech recognition
