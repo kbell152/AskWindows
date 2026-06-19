@@ -3,38 +3,40 @@
 #  AskWindows
 #
 #  Listens to the microphone and converts speech to text using
-#  SpeechRecognition + sounddevice (ARM64 Windows compatible).
-#  Mirrors MicInput.swift — same purpose, same reliability trade-off.
+#  SpeechRecognition + Google Web Speech API (same reliability trade-off
+#  as AskMac's requiresOnDeviceRecognition = false).
 #
-#  Runs in a background thread; fires callbacks via a thread-safe queue
-#  that main.py drains on the tkinter main loop every 100ms.
+#  Also supports Vosk for fully offline recognition — set USE_OFFLINE = True
+#  below if you want to experiment, but leave False for production parity
+#  with AskMac.
+#
+#  Runs in a background thread; fires callbacks on the calling thread via
+#  a thread-safe queue that main.py drains on the tkinter main loop.
 #
 
 import queue
 import threading
-import io
-import wave
-import numpy as np
-import sounddevice as sd
 import speech_recognition as sr
 
 
-SAMPLE_RATE = 16000
-CHANNELS = 1
-DTYPE = 'int16'
-CHUNK_SECONDS = 5       # capture in 5-second chunks
-SILENCE_THRESHOLD = 500 # RMS below this = silence
+USE_OFFLINE = False  # True = Vosk (must pip install vosk + download model)
 
 
 class MicInput:
     """
-    Async microphone listener using sounddevice (ARM64 compatible).
-    All callbacks arrive on a queue; the UI loop should call
-    drain_callbacks() regularly (e.g. every 100ms).
+    Async microphone listener. All callbacks arrive on a queue; the UI
+    loop should call drain_callbacks() regularly (e.g. every 100 ms).
     """
 
     def __init__(self):
         self._recognizer = sr.Recognizer()
+        # Tune for typical quiet home/office environments.
+        # Shorter pause_threshold = 4-second-silence handled by conversation
+        # mode itself; we keep recognition segments shorter.
+        self._recognizer.pause_threshold = 0.8
+        self._recognizer.energy_threshold = 300
+        self._recognizer.dynamic_energy_threshold = True
+
         self._queue: queue.Queue = queue.Queue()
         self._listen_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -42,6 +44,9 @@ class MicInput:
         self.is_listening = False
         self.error_message: str | None = None
 
+        # Callbacks the owner registers:
+        # on_transcript(text)  — partial or final text update
+        # on_error(message)    — something went wrong
         self._on_transcript = None
         self._on_error = None
 
@@ -50,6 +55,11 @@ class MicInput:
     # ------------------------------------------------------------------
 
     def start_listening(self, on_transcript=None, on_error=None):
+        """
+        Start continuous microphone capture.
+        on_transcript(text) is called with each recognised segment.
+        on_error(message) is called on failure.
+        """
         if self.is_listening:
             return
         self._on_transcript = on_transcript
@@ -62,6 +72,9 @@ class MicInput:
         self._listen_thread.start()
 
     def stop_listening(self) -> str:
+        """
+        Stop listening. Returns whatever transcript was accumulated.
+        """
         if not self.is_listening:
             return ""
         self._stop_event.set()
@@ -71,6 +84,10 @@ class MicInput:
         return ""
 
     def drain_callbacks(self):
+        """
+        Call this regularly from the UI main loop (e.g. root.after(100, ...)).
+        Fires any queued on_transcript / on_error callbacks on the UI thread.
+        """
         while not self._queue.empty():
             try:
                 kind, payload = self._queue.get_nowait()
@@ -86,59 +103,58 @@ class MicInput:
     # ------------------------------------------------------------------
 
     def _listen_worker(self):
-        while not self._stop_event.is_set():
+        """
+        Continuously reads audio chunks and recognises each one.
+        Uses Google Web Speech (free, no key, mirrors AskMac's cloud STT).
+        Falls back to Sphinx offline if Google fails.
+        """
+        mic = sr.Microphone()
+        with mic as source:
+            # Calibrate for ambient noise on first open.
             try:
-                # Record a chunk of audio
-                frames = int(SAMPLE_RATE * CHUNK_SECONDS)
-                recording = sd.rec(
-                    frames,
-                    samplerate=SAMPLE_RATE,
-                    channels=CHANNELS,
-                    dtype=DTYPE
-                )
-                sd.wait()
+                self._recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            except Exception:
+                pass
+
+            while not self._stop_event.is_set():
+                try:
+                    audio = self._recognizer.listen(
+                        source,
+                        timeout=1,          # re-check stop_event every second
+                        phrase_time_limit=30
+                    )
+                except sr.WaitTimeoutError:
+                    continue  # silence — loop back and check stop_event
+                except Exception as e:
+                    if not self._stop_event.is_set():
+                        self._queue.put(("error",
+                            f"Microphone error — {e}. Check your mic settings."))
+                    break
 
                 if self._stop_event.is_set():
                     break
 
-                # Skip silent chunks
-                rms = np.sqrt(np.mean(recording.astype(np.float32) ** 2))
-                if rms < SILENCE_THRESHOLD:
-                    continue
-
-                # Convert numpy array to WAV bytes for SpeechRecognition
-                wav_buffer = io.BytesIO()
-                with wave.open(wav_buffer, 'wb') as wf:
-                    wf.setnchannels(CHANNELS)
-                    wf.setsampwidth(2)  # int16 = 2 bytes
-                    wf.setframerate(SAMPLE_RATE)
-                    wf.writeframes(recording.tobytes())
-                wav_buffer.seek(0)
-
-                # Recognise in a sub-thread so we keep recording
+                # Recognise in a quick sub-thread so we can keep listening.
                 threading.Thread(
                     target=self._recognise,
-                    args=(wav_buffer,),
+                    args=(audio,),
                     daemon=True
                 ).start()
 
-            except Exception as e:
-                if not self._stop_event.is_set():
-                    self._queue.put(("error",
-                        f"Microphone error — {e}. Check your mic settings."))
-                break
-
-    def _recognise(self, wav_buffer: io.BytesIO):
+    def _recognise(self, audio: sr.AudioData):
         if self._stop_event.is_set():
             return
         try:
-            with sr.AudioFile(wav_buffer) as source:
-                audio = self._recognizer.record(source)
-            text = self._recognizer.recognize_google(audio)
+            if USE_OFFLINE:
+                text = self._recognizer.recognize_vosk(audio)
+            else:
+                text = self._recognizer.recognize_google(audio)
+
             if text and not self._stop_event.is_set():
                 self._queue.put(("transcript", text))
+
         except sr.UnknownValueError:
-            pass  # silence / unintelligible
+            pass  # silence / unintelligible — not an error
         except sr.RequestError as e:
             if not self._stop_event.is_set():
                 self._queue.put(("error",
