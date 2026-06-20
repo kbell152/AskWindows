@@ -275,6 +275,7 @@ class ChatView(ctk.CTkFrame):
 
             payload = {
                 "inviteCode": self._settings.invite_code,
+                "platform":   "windows",
                 "messages":   messages,
                 "userContext": {
                     "name":        self._settings.name,
