@@ -261,17 +261,30 @@ class ChatView(ctk.CTkFrame):
 
     def _fetch_answer(self, question: str, speak_reply: bool):
         try:
+            # The worker expects an Anthropic-style `messages` array, not a
+            # single `question` string. Send the recent conversation, trimmed
+            # so it BEGINS with a user message (Anthropic requires that —
+            # our first stored message is the assistant greeting).
+            recent = self._messages[-20:]
+            while recent and recent[0]["role"] != "user":
+                recent = recent[1:]
+            messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in recent
+            ]
+
             payload = {
-                "inviteCode":  self._settings.invite_code,
-                "question":    question,
-                "userContext": self._settings.user_context(),
-                "history":     self._messages[-20:],   # last 20 for context
+                "inviteCode": self._settings.invite_code,
+                "messages":   messages,
+                "userContext": {
+                    "name":        self._settings.name,
+                    "skill":       self._settings.skill,
+                    "tone":        self._settings.tone,
+                    "osVersion":   self._settings.os_version,
+                    "inputDevice": self._settings.input_device,
+                },
             }
-            resp = requests.post(
-                SERVER_URL,
-                json=payload,
-                timeout=30
-            )
+            resp = requests.post(SERVER_URL, json=payload, timeout=30)
             data = resp.json()
             if "reply" in data:
                 self.after(0, self._on_answer, data["reply"], speak_reply)

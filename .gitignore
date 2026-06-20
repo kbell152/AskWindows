@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# PyInstaller build output (generated — NOT the .spec, which is source)
+build/
+dist/
+
+# App user data (lives in %APPDATA%, but ignore stray local copies)
+settings.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Stray archives
+*.zip
+
