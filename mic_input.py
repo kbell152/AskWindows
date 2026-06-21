@@ -106,40 +106,52 @@ class MicInput:
         """
         Continuously reads audio chunks and recognises each one.
         Uses Google Web Speech (free, no key, mirrors AskMac's cloud STT).
-        Falls back to Sphinx offline if Google fails.
         """
-        mic = sr.Microphone()
-        with mic as source:
-            # Calibrate for ambient noise on first open.
-            try:
-                self._recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            except Exception:
-                pass
+        # Opening the mic can fail outright on a PC with no audio input
+        # device (a VM with no mic passed through, or a desktop with nothing
+        # plugged in). Handle it gracefully instead of crashing this thread.
+        try:
+            mic = sr.Microphone()
+        except Exception:
+            if not self._stop_event.is_set():
+                self._queue.put(("error",
+                    "I couldn't find a microphone on this PC. "
+                    "You can still type your questions."))
+            self.is_listening = False
+            return
 
-            while not self._stop_event.is_set():
+        try:
+            with mic as source:
                 try:
-                    audio = self._recognizer.listen(
-                        source,
-                        timeout=1,          # re-check stop_event every second
-                        phrase_time_limit=30
-                    )
-                except sr.WaitTimeoutError:
-                    continue  # silence — loop back and check stop_event
-                except Exception as e:
-                    if not self._stop_event.is_set():
-                        self._queue.put(("error",
-                            f"Microphone error — {e}. Check your mic settings."))
-                    break
+                    self._recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                except Exception:
+                    pass
 
-                if self._stop_event.is_set():
-                    break
+                while not self._stop_event.is_set():
+                    try:
+                        audio = self._recognizer.listen(
+                            source, timeout=1, phrase_time_limit=30)
+                    except sr.WaitTimeoutError:
+                        continue
+                    except Exception as e:
+                        if not self._stop_event.is_set():
+                            self._queue.put(("error",
+                                f"Microphone error — {e}. Check your mic settings."))
+                        break
 
-                # Recognise in a quick sub-thread so we can keep listening.
-                threading.Thread(
-                    target=self._recognise,
-                    args=(audio,),
-                    daemon=True
-                ).start()
+                    if self._stop_event.is_set():
+                        break
+
+                    threading.Thread(
+                        target=self._recognise, args=(audio,), daemon=True).start()
+        except Exception:
+            # The stream itself failed to open (device vanished / PortAudio error).
+            if not self._stop_event.is_set():
+                self._queue.put(("error",
+                    "The microphone stopped working. "
+                    "You can still type your questions."))
+        finally:
+            self.is_listening = False
 
     def _recognise(self, audio: sr.AudioData):
         if self._stop_event.is_set():

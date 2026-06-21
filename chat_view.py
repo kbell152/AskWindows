@@ -352,10 +352,14 @@ class ChatView(ctk.CTkFrame):
         self._input_var.set(text)
 
     def _on_mic_error(self, message: str):
+        # If the mic fails mid-conversation, tear conversation mode down
+        # cleanly so the buttons and status don't get stuck.
+        if self._is_conversing:
+            self._stop_conversation_mode()
         self._mic_active = False
         self._mic_btn.configure(text="🎤", fg_color=ORANGE, hover_color=ORANGE_HOVER)
         messagebox.showwarning("Microphone", message)
-
+        
     # ==================================================================
     # Conversation mode  (mirrors Swift state machine exactly)
     # ==================================================================
