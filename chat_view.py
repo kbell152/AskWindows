@@ -12,19 +12,28 @@
 #   - Text zoom (Ctrl +/-)
 #
 
+import base64
 import threading
 import time
 import requests
 import customtkinter as ctk
-from tkinter import messagebox
+from io import BytesIO
+from tkinter import filedialog, messagebox
 from user_settings import UserSettings, SKILL_OPTIONS, TONE_OPTIONS
 from speech import SpeechPlayer
 from mic_input import MicInput
+
+try:
+    from PIL import Image, ImageGrab
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
 
 ORANGE       = "#FF8C00"
 ORANGE_HOVER = "#CC6600"
 SERVER_URL   = "https://askmac-server.morning-poetry-8fbb.workers.dev"
 SILENCE_SECONDS = 4.0   # matches AskMac's 4-second silence timer
+IMAGE_MAX_PX    = 1568  # Anthropic recommended max dimension
 
 
 class ChatView(ctk.CTkFrame):
@@ -49,6 +58,10 @@ class ChatView(ctk.CTkFrame):
 
         # Messages: list of {"role": "user"|"assistant", "content": str}
         self._messages: list[dict] = []
+
+        # Pending image attachment (set by paste or file picker, cleared on send)
+        self._pending_image_b64: str | None = None
+        self._pending_media_type: str = "image/png"
 
         # Text zoom (mirrored from AppStorage)
         self._base_font_size = 13
@@ -90,6 +103,31 @@ class ChatView(ctk.CTkFrame):
         self._chat_frame.pack(fill="both", expand=True, padx=16, pady=10)
         self._chat_frame.columnconfigure(0, weight=1)
 
+        # ── Pending image preview bar ─────────────────────────────────
+        # Hidden until the user pastes or attaches an image; shown between
+        # the chat scroll area and the status/input strip.
+        self._preview_bar = ctk.CTkFrame(
+            self, fg_color=("gray88", "gray18"), corner_radius=8)
+        # Not packed yet — _set_pending_image packs it dynamically.
+
+        self._preview_thumb = ctk.CTkLabel(self._preview_bar, text="")
+        self._preview_thumb.pack(side="left", padx=(10, 4), pady=8)
+
+        ctk.CTkLabel(
+            self._preview_bar,
+            text="Image attached — will send with your next message",
+            font=ctk.CTkFont(size=11),
+            text_color="gray55",
+        ).pack(side="left", padx=4)
+
+        ctk.CTkButton(
+            self._preview_bar, text="✕", width=26, height=26,
+            font=ctk.CTkFont(size=11),
+            fg_color="transparent",
+            hover_color=("gray75", "gray30"),
+            command=self._clear_pending_image,
+        ).pack(side="right", padx=8)
+
         # ── Status label (conversation mode) ────────────────────────
         self._status_label = ctk.CTkLabel(
             self,
@@ -114,6 +152,8 @@ class ChatView(ctk.CTkFrame):
         )
         self._entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._entry.bind("<Return>", lambda e: self._send_text())
+        # Ctrl-V: intercept when clipboard holds an image; fall through for text.
+        self._entry.bind("<Control-v>", self._on_paste)
 
         # Conversation mode button (waveform)
         self._conv_btn = ctk.CTkButton(
@@ -138,6 +178,18 @@ class ChatView(ctk.CTkFrame):
             command=self._toggle_mic,
         )
         self._mic_btn.pack(side="right", padx=(4, 0))
+
+        # Attach / photo button
+        self._attach_btn = ctk.CTkButton(
+            bottom,
+            text="📎",
+            width=36, height=36,
+            font=ctk.CTkFont(size=16),
+            fg_color=ORANGE,
+            hover_color=ORANGE_HOVER,
+            command=self._attach_file,
+        )
+        self._attach_btn.pack(side="right", padx=(4, 0))
 
         # Send button
         self._send_btn = ctk.CTkButton(
@@ -180,7 +232,8 @@ class ChatView(ctk.CTkFrame):
     # Chat rendering
     # ==================================================================
 
-    def _add_message(self, role: str, content: str, speak=False):
+    def _add_message(self, role: str, content: str, speak=False,
+                     image_b64: str | None = None):
         self._messages.append({"role": role, "content": content})
 
         row = len(self._messages) - 1
@@ -206,6 +259,22 @@ class ChatView(ctk.CTkFrame):
             justify="left",
             anchor="w",
         )
+
+        # If an image accompanies this message, show a thumbnail above the text.
+        if image_b64 and _PIL_AVAILABLE:
+            try:
+                img = Image.open(BytesIO(base64.b64decode(image_b64)))
+                img.thumbnail((220, 180))
+                ctk_img = ctk.CTkImage(
+                    light_image=img.convert("RGBA"),
+                    size=(img.width, img.height),
+                )
+                img_lbl = ctk.CTkLabel(bubble, text="", image=ctk_img)
+                img_lbl._ctk_image = ctk_img   # prevent GC
+                img_lbl.pack(padx=12, pady=(8, 2))
+            except Exception:
+                pass
+
         text_lbl.pack(padx=12, pady=8)
 
         # Speaker button for assistant messages
@@ -230,6 +299,90 @@ class ChatView(ctk.CTkFrame):
             self._speech.speak(content,
                                on_done=self._on_speech_done_in_conv_mode)
 
+    # ==================================================================
+    # Image attachment (paste + file picker)
+    # ==================================================================
+
+    def _on_paste(self, event):
+        """
+        Fired when the user presses Ctrl-V in the input entry.
+        If the clipboard contains an image, attach it and consume the event.
+        If it contains text, fall through so the Entry handles it normally.
+        """
+        if not _PIL_AVAILABLE:
+            return None
+        try:
+            img = ImageGrab.grabclipboard()
+            if isinstance(img, Image.Image):
+                self._set_pending_image(img, "image/png")
+                return "break"   # consume — don't also paste text
+        except Exception:
+            pass
+        return None              # no image — let Entry paste text as usual
+
+    def _attach_file(self):
+        """Open a file picker and attach the chosen image."""
+        if not _PIL_AVAILABLE:
+            messagebox.showerror("Attachment",
+                "Image support requires Pillow. Please reinstall the app.")
+            return
+        path = filedialog.askopenfilename(
+            title="Attach an image",
+            filetypes=[
+                ("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            img = Image.open(path)
+            ext = path.rsplit(".", 1)[-1].lower()
+            media_type = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png",  "gif": "image/gif",
+                "webp": "image/webp",
+            }.get(ext, "image/png")
+            # BMP has no Anthropic media type — convert to PNG silently.
+            self._set_pending_image(img, media_type)
+        except Exception as e:
+            messagebox.showerror("Attachment", f"Could not open image:\n{e}")
+
+    def _set_pending_image(self, img: "Image.Image", media_type: str):
+        """Resize, encode to base64, and show the preview bar."""
+        # Downscale if larger than Anthropic's recommended maximum.
+        w, h = img.size
+        if max(w, h) > IMAGE_MAX_PX:
+            scale = IMAGE_MAX_PX / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+        # Encode to base64.
+        buf = BytesIO()
+        fmt = "JPEG" if media_type == "image/jpeg" else "PNG"
+        img.convert("RGB" if fmt == "JPEG" else "RGBA").save(buf, format=fmt)
+        self._pending_image_b64  = base64.b64encode(buf.getvalue()).decode()
+        self._pending_media_type = media_type
+
+        # Render a small thumbnail in the preview bar.
+        thumb = img.copy()
+        thumb.thumbnail((60, 60))
+        ctk_thumb = ctk.CTkImage(
+            light_image=thumb.convert("RGBA"),
+            size=(thumb.width, thumb.height),
+        )
+        self._preview_thumb.configure(image=ctk_thumb, text="")
+        self._preview_thumb._ctk_image = ctk_thumb   # prevent GC
+
+        # Slide the preview bar in between the chat area and the status strip.
+        self._preview_bar.pack(fill="x", padx=16, pady=(0, 4),
+                               after=self._chat_frame)
+
+    def _clear_pending_image(self):
+        """Remove the pending image and hide the preview bar."""
+        self._pending_image_b64  = None
+        self._pending_media_type = "image/png"
+        self._preview_bar.pack_forget()
+
     def _toggle_speak(self, content: str):
         if self._speech.is_speaking:
             self._speech.stop()
@@ -242,24 +395,37 @@ class ChatView(ctk.CTkFrame):
 
     def _send_text(self):
         text = self._input_var.get().strip()
-        if not text:
-            return
-        self._input_var.set("")
-        self._dispatch_question(text)
+        image_b64   = self._pending_image_b64
+        media_type  = self._pending_media_type
 
-    def _dispatch_question(self, text: str, speak_reply=False):
-        self._add_message("user", text)
+        if not text and not image_b64:
+            return
+
+        # Default caption when only an image is sent with no question text.
+        if not text and image_b64:
+            text = "What do you see in this image?"
+
+        self._input_var.set("")
+        self._clear_pending_image()
+        self._dispatch_question(text, image_b64=image_b64, media_type=media_type)
+
+    def _dispatch_question(self, text: str, speak_reply=False,
+                            image_b64: str | None = None,
+                            media_type: str = "image/png"):
+        self._add_message("user", text, image_b64=image_b64)
         self._set_status("Thinking…" if self._is_conversing else "")
         self._entry.configure(state="disabled")
         self._send_btn.configure(state="disabled")
 
         threading.Thread(
             target=self._fetch_answer,
-            args=(text, speak_reply),
+            args=(text, speak_reply, image_b64, media_type),
             daemon=True
         ).start()
 
-    def _fetch_answer(self, question: str, speak_reply: bool):
+    def _fetch_answer(self, question: str, speak_reply: bool,
+                      image_b64: str | None = None,
+                      media_type: str = "image/png"):
         try:
             # The worker expects an Anthropic-style `messages` array, not a
             # single `question` string. Send the recent conversation, trimmed
@@ -268,10 +434,28 @@ class ChatView(ctk.CTkFrame):
             recent = self._messages[-20:]
             while recent and recent[0]["role"] != "user":
                 recent = recent[1:]
-            messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in recent
-            ]
+
+            messages = []
+            for i, m in enumerate(recent):
+                is_last = (i == len(recent) - 1)
+                # For the final user message, if we have an image attach it as
+                # a content array (Anthropic vision format). Older history
+                # messages are sent as plain text strings to keep payloads small.
+                if is_last and m["role"] == "user" and image_b64:
+                    content = [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_b64,
+                            },
+                        },
+                        {"type": "text", "text": question},
+                    ]
+                else:
+                    content = m["content"]
+                messages.append({"role": m["role"], "content": content})
 
             payload = {
                 "inviteCode": self._settings.invite_code,

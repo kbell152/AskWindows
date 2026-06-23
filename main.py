@@ -27,7 +27,12 @@ class AskWindowsApp(ctk.CTk):
         self._settings = UserSettings()
 
         self.title(APP_TITLE)
-        self.geometry(f"{WIN_WIDTH}x{WIN_HEIGHT}")
+
+        # Clamp window height to 85 % of the screen so it never overflows
+        # on low-resolution displays or displays with high DPI scaling.
+        screen_h = self.winfo_screenheight()
+        win_h = min(WIN_HEIGHT, max(MIN_HEIGHT, int(screen_h * 0.85)))
+        self.geometry(f"{WIN_WIDTH}x{win_h}")
         self.minsize(MIN_WIDTH, MIN_HEIGHT)
 
         # Use system default appearance (respects Windows dark/light mode).
