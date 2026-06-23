@@ -71,7 +71,7 @@ exe = EXE(
 
     # console=True during initial validation so any crash prints a traceback
     # to the terminal window.  Flip to False before zipping for distribution.
-    console=True,
+    console=False,
 
     disable_windowed_traceback=False,
     target_arch=None,
