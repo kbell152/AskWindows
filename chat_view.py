@@ -10,11 +10,13 @@
 #   - TTS read-aloud per message
 #   - Settings sheet
 #   - Text zoom (Ctrl +/-)
+#   - Image paste (Ctrl-V), file attach (📎), right-click context menu
 #
 
 import base64
 import threading
 import time
+import tkinter as tk
 import requests
 import customtkinter as ctk
 from io import BytesIO
@@ -29,11 +31,11 @@ try:
 except ImportError:
     _PIL_AVAILABLE = False
 
-ORANGE       = "#FF8C00"
-ORANGE_HOVER = "#CC6600"
-SERVER_URL   = "https://askmac-server.morning-poetry-8fbb.workers.dev"
-SILENCE_SECONDS = 4.0   # matches AskMac's 4-second silence timer
-IMAGE_MAX_PX    = 1568  # Anthropic recommended max dimension
+ORANGE          = "#FF8C00"
+ORANGE_HOVER    = "#CC6600"
+SERVER_URL      = "https://askmac-server.morning-poetry-8fbb.workers.dev"
+SILENCE_SECONDS = 4.0    # matches AskMac's 4-second silence timer
+IMAGE_MAX_PX    = 1568   # Anthropic recommended max dimension
 
 
 class ChatView(ctk.CTkFrame):
@@ -53,7 +55,7 @@ class ChatView(ctk.CTkFrame):
         self._conv_transcript    = ""
 
         # Single-shot mic state
-        self._mic_active = False
+        self._mic_active     = False
         self._mic_transcript = ""
 
         # Messages: list of {"role": "user"|"assistant", "content": str}
@@ -61,9 +63,9 @@ class ChatView(ctk.CTkFrame):
 
         # Pending image attachment (set by paste or file picker, cleared on send)
         self._pending_image_b64: str | None = None
-        self._pending_media_type: str = "image/png"
+        self._pending_media_type: str       = "image/png"
 
-        # Text zoom (mirrored from AppStorage)
+        # Text zoom
         self._base_font_size = 13
 
         self._build()
@@ -103,12 +105,23 @@ class ChatView(ctk.CTkFrame):
         self._chat_frame.pack(fill="both", expand=True, padx=16, pady=10)
         self._chat_frame.columnconfigure(0, weight=1)
 
-        # ── Pending image preview bar ─────────────────────────────────
-        # Hidden until the user pastes or attaches an image; shown between
-        # the chat scroll area and the status/input strip.
+        # ── Pending image preview ─────────────────────────────────────
+        # A transparent host frame is always packed here so the preview bar
+        # can appear/disappear inside it without needing pack(after=...) or
+        # pack(before=...) references to CTkScrollableFrame (which fails
+        # because CTkScrollableFrame maps to an inner canvas widget, not the
+        # outer packed frame).
+        self._preview_host = ctk.CTkFrame(self, fg_color="transparent",
+                                          height=0)
+        self._preview_host.pack(fill="x")
+        self._preview_host.pack_propagate(False)   # collapse when empty
+
         self._preview_bar = ctk.CTkFrame(
-            self, fg_color=("gray88", "gray18"), corner_radius=8)
-        # Not packed yet — _set_pending_image packs it dynamically.
+            self._preview_host,
+            fg_color=("gray88", "gray18"),
+            corner_radius=8,
+        )
+        # Not packed yet — _set_pending_image shows it, _clear hides it.
 
         self._preview_thumb = ctk.CTkLabel(self._preview_bar, text="")
         self._preview_thumb.pack(side="left", padx=(10, 4), pady=8)
@@ -121,7 +134,8 @@ class ChatView(ctk.CTkFrame):
         ).pack(side="left", padx=4)
 
         ctk.CTkButton(
-            self._preview_bar, text="✕", width=26, height=26,
+            self._preview_bar,
+            text="✕", width=26, height=26,
             font=ctk.CTkFont(size=11),
             fg_color="transparent",
             hover_color=("gray75", "gray30"),
@@ -154,6 +168,11 @@ class ChatView(ctk.CTkFrame):
         self._entry.bind("<Return>", lambda e: self._send_text())
         # Ctrl-V: intercept when clipboard holds an image; fall through for text.
         self._entry.bind("<Control-v>", self._on_paste)
+        # Right-click context menu.
+        try:
+            self._entry._entry.bind("<Button-3>", self._show_context_menu)
+        except AttributeError:
+            self._entry.bind("<Button-3>", self._show_context_menu)
 
         # Conversation mode button (waveform)
         self._conv_btn = ctk.CTkButton(
@@ -211,7 +230,11 @@ class ChatView(ctk.CTkFrame):
 
         # ── Welcome message ──────────────────────────────────────────
         name = self._settings.name
-        greeting = f"Hi{' ' + name if name else ''}! I'm Ask Windows — your friendly Mac-to-Windows helper. What would you like to know?"
+        greeting = (
+            f"Hi{' ' + name if name else ''}! "
+            "I'm Ask Windows — your friendly Mac-to-Windows helper. "
+            "What would you like to know?"
+        )
         self._add_message("assistant", greeting)
 
     # ==================================================================
@@ -236,8 +259,8 @@ class ChatView(ctk.CTkFrame):
                      image_b64: str | None = None):
         self._messages.append({"role": role, "content": content})
 
-        row = len(self._messages) - 1
-        is_user = role == "user"
+        row      = len(self._messages) - 1
+        is_user  = role == "user"
 
         bubble_color = (ORANGE, "#994400") if is_user else ("gray85", "gray20")
         anchor = "e" if is_user else "w"
@@ -251,16 +274,7 @@ class ChatView(ctk.CTkFrame):
         bubble.grid(row=row * 2, column=0, sticky=anchor,
                     padx=padx, pady=(4, 0))
 
-        text_lbl = ctk.CTkLabel(
-            bubble,
-            text=content,
-            font=ctk.CTkFont(size=self._base_font_size),
-            wraplength=480,
-            justify="left",
-            anchor="w",
-        )
-
-        # If an image accompanies this message, show a thumbnail above the text.
+        # Image thumbnail (shown above text when a photo was attached)
         if image_b64 and _PIL_AVAILABLE:
             try:
                 img = Image.open(BytesIO(base64.b64decode(image_b64)))
@@ -275,6 +289,14 @@ class ChatView(ctk.CTkFrame):
             except Exception:
                 pass
 
+        text_lbl = ctk.CTkLabel(
+            bubble,
+            text=content,
+            font=ctk.CTkFont(size=self._base_font_size),
+            wraplength=480,
+            justify="left",
+            anchor="w",
+        )
         text_lbl.pack(padx=12, pady=8)
 
         # Speaker button for assistant messages
@@ -299,8 +321,14 @@ class ChatView(ctk.CTkFrame):
             self._speech.speak(content,
                                on_done=self._on_speech_done_in_conv_mode)
 
+    def _toggle_speak(self, content: str):
+        if self._speech.is_speaking:
+            self._speech.stop()
+        else:
+            self._speech.speak(content)
+
     # ==================================================================
-    # Image attachment (paste + file picker)
+    # Image attachment (Ctrl-V paste + file picker)
     # ==================================================================
 
     def _on_paste(self, event):
@@ -323,7 +351,8 @@ class ChatView(ctk.CTkFrame):
     def _attach_file(self):
         """Open a file picker and attach the chosen image."""
         if not _PIL_AVAILABLE:
-            messagebox.showerror("Attachment",
+            messagebox.showerror(
+                "Attachment",
                 "Image support requires Pillow. Please reinstall the app.")
             return
         path = filedialog.askopenfilename(
@@ -342,8 +371,7 @@ class ChatView(ctk.CTkFrame):
                 "jpg": "image/jpeg", "jpeg": "image/jpeg",
                 "png": "image/png",  "gif": "image/gif",
                 "webp": "image/webp",
-            }.get(ext, "image/png")
-            # BMP has no Anthropic media type — convert to PNG silently.
+            }.get(ext, "image/png")   # BMP → PNG (Anthropic doesn't support BMP)
             self._set_pending_image(img, media_type)
         except Exception as e:
             messagebox.showerror("Attachment", f"Could not open image:\n{e}")
@@ -363,7 +391,7 @@ class ChatView(ctk.CTkFrame):
         self._pending_image_b64  = base64.b64encode(buf.getvalue()).decode()
         self._pending_media_type = media_type
 
-        # Render a small thumbnail in the preview bar.
+        # Show thumbnail in preview bar.
         thumb = img.copy()
         thumb.thumbnail((60, 60))
         ctk_thumb = ctk.CTkImage(
@@ -373,41 +401,111 @@ class ChatView(ctk.CTkFrame):
         self._preview_thumb.configure(image=ctk_thumb, text="")
         self._preview_thumb._ctk_image = ctk_thumb   # prevent GC
 
-        # Slide the preview bar in between the chat area and the status strip.
-        self._preview_bar.pack(fill="x", padx=16, pady=(0, 4),
-                               after=self._chat_frame)
+        # Show the preview bar inside its host frame and expand the host.
+        self._preview_bar.pack(fill="x", padx=4, pady=4)
+        self._preview_host.configure(height=68)
+        self._preview_host.pack_propagate(False)
 
     def _clear_pending_image(self):
-        """Remove the pending image and hide the preview bar."""
+        """Remove the pending image and collapse the preview host."""
         self._pending_image_b64  = None
         self._pending_media_type = "image/png"
         self._preview_bar.pack_forget()
+        self._preview_host.configure(height=0)
 
-    def _toggle_speak(self, content: str):
-        if self._speech.is_speaking:
-            self._speech.stop()
-        else:
-            self._speech.speak(content)
+    # ==================================================================
+    # Right-click context menu on the input entry
+    # ==================================================================
+
+    def _show_context_menu(self, event):
+        """Show Cut / Copy / Paste / Select All at the cursor position."""
+        menu = tk.Menu(self, tearoff=0)
+
+        # Determine whether any text is selected.
+        try:
+            inner = self._entry._entry
+        except AttributeError:
+            inner = None
+
+        has_sel = False
+        if inner:
+            try:
+                has_sel = bool(inner.selection_get())
+            except Exception:
+                pass
+
+        def fire(seq):
+            if inner:
+                inner.event_generate(seq)
+            else:
+                self._entry.event_generate(seq)
+
+        menu.add_command(
+            label="Cut",
+            state="normal" if has_sel else "disabled",
+            command=lambda: fire("<<Cut>>"),
+        )
+        menu.add_command(
+            label="Copy",
+            state="normal" if has_sel else "disabled",
+            command=lambda: fire("<<Copy>>"),
+        )
+        menu.add_command(label="Paste", command=self._context_paste)
+        menu.add_separator()
+        menu.add_command(
+            label="Select All",
+            command=lambda: (
+                (inner or self._entry).focus_set(),
+                (inner or self._entry).select_range(0, "end")
+                    if hasattr((inner or self._entry), "select_range")
+                    else fire("<<SelectAll>>"),
+            ),
+        )
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _context_paste(self):
+        """
+        Paste from the right-click menu.
+        Checks for an image first (same logic as Ctrl-V); falls back to text.
+        """
+        if _PIL_AVAILABLE:
+            try:
+                img = ImageGrab.grabclipboard()
+                if isinstance(img, Image.Image):
+                    self._set_pending_image(img, "image/png")
+                    return
+            except Exception:
+                pass
+        # No image — paste text into the entry.
+        try:
+            self._entry._entry.event_generate("<<Paste>>")
+        except AttributeError:
+            self._entry.event_generate("<<Paste>>")
 
     # ==================================================================
     # Sending questions
     # ==================================================================
 
     def _send_text(self):
-        text = self._input_var.get().strip()
-        image_b64   = self._pending_image_b64
-        media_type  = self._pending_media_type
+        text       = self._input_var.get().strip()
+        image_b64  = self._pending_image_b64
+        media_type = self._pending_media_type
 
         if not text and not image_b64:
             return
 
-        # Default caption when only an image is sent with no question text.
+        # Default caption when the user sends only an image.
         if not text and image_b64:
             text = "What do you see in this image?"
 
         self._input_var.set("")
         self._clear_pending_image()
-        self._dispatch_question(text, image_b64=image_b64, media_type=media_type)
+        self._dispatch_question(text, image_b64=image_b64,
+                                media_type=media_type)
 
     def _dispatch_question(self, text: str, speak_reply=False,
                             image_b64: str | None = None,
@@ -420,17 +518,13 @@ class ChatView(ctk.CTkFrame):
         threading.Thread(
             target=self._fetch_answer,
             args=(text, speak_reply, image_b64, media_type),
-            daemon=True
+            daemon=True,
         ).start()
 
     def _fetch_answer(self, question: str, speak_reply: bool,
                       image_b64: str | None = None,
                       media_type: str = "image/png"):
         try:
-            # The worker expects an Anthropic-style `messages` array, not a
-            # single `question` string. Send the recent conversation, trimmed
-            # so it BEGINS with a user message (Anthropic requires that —
-            # our first stored message is the assistant greeting).
             recent = self._messages[-20:]
             while recent and recent[0]["role"] != "user":
                 recent = recent[1:]
@@ -438,9 +532,8 @@ class ChatView(ctk.CTkFrame):
             messages = []
             for i, m in enumerate(recent):
                 is_last = (i == len(recent) - 1)
-                # For the final user message, if we have an image attach it as
-                # a content array (Anthropic vision format). Older history
-                # messages are sent as plain text strings to keep payloads small.
+                # For the final user turn, attach the image as a content array
+                # (Anthropic vision format). Older turns stay as plain strings.
                 if is_last and m["role"] == "user" and image_b64:
                     content = [
                         {
@@ -458,9 +551,9 @@ class ChatView(ctk.CTkFrame):
                 messages.append({"role": m["role"], "content": content})
 
             payload = {
-                "inviteCode": self._settings.invite_code,
-                "platform":   "windows",
-                "messages":   messages,
+                "inviteCode":  self._settings.invite_code,
+                "platform":    "windows",
+                "messages":    messages,
                 "userContext": {
                     "name":        self._settings.name,
                     "skill":       self._settings.skill,
@@ -506,10 +599,8 @@ class ChatView(ctk.CTkFrame):
 
     def _toggle_mic(self):
         if self._is_conversing:
-            # In conversation mode, mic button = mute/unmute
             self._toggle_conv_mute()
             return
-
         if self._mic_active:
             self._stop_single_mic()
         else:
@@ -518,7 +609,8 @@ class ChatView(ctk.CTkFrame):
     def _start_single_mic(self):
         self._mic_active = True
         self._mic_transcript = ""
-        self._mic_btn.configure(text="⏹", fg_color="red", hover_color="#880000")
+        self._mic_btn.configure(text="⏹", fg_color="red",
+                                hover_color="#880000")
         self._mic.start_listening(
             on_transcript=self._on_single_mic_transcript,
             on_error=self._on_mic_error,
@@ -527,7 +619,8 @@ class ChatView(ctk.CTkFrame):
     def _stop_single_mic(self):
         self._mic.stop_listening()
         self._mic_active = False
-        self._mic_btn.configure(text="🎤", fg_color=ORANGE, hover_color=ORANGE_HOVER)
+        self._mic_btn.configure(text="🎤", fg_color=ORANGE,
+                                hover_color=ORANGE_HOVER)
         if self._mic_transcript.strip():
             self._input_var.set(self._mic_transcript)
 
@@ -536,14 +629,13 @@ class ChatView(ctk.CTkFrame):
         self._input_var.set(text)
 
     def _on_mic_error(self, message: str):
-        # If the mic fails mid-conversation, tear conversation mode down
-        # cleanly so the buttons and status don't get stuck.
         if self._is_conversing:
             self._stop_conversation_mode()
         self._mic_active = False
-        self._mic_btn.configure(text="🎤", fg_color=ORANGE, hover_color=ORANGE_HOVER)
+        self._mic_btn.configure(text="🎤", fg_color=ORANGE,
+                                hover_color=ORANGE_HOVER)
         messagebox.showwarning("Microphone", message)
-        
+
     # ==================================================================
     # Conversation mode  (mirrors Swift state machine exactly)
     # ==================================================================
@@ -556,8 +648,9 @@ class ChatView(ctk.CTkFrame):
 
     def _start_conversation_mode(self):
         self._is_conversing = True
-        self._conv_muted = False
-        self._conv_btn.configure(text="⏹", fg_color="red", hover_color="#880000")
+        self._conv_muted    = False
+        self._conv_btn.configure(text="⏹", fg_color="red",
+                                 hover_color="#880000")
         self._set_status("Listening…")
         self._start_conversation_listen()
 
@@ -566,8 +659,10 @@ class ChatView(ctk.CTkFrame):
         self._cancel_silence_timer()
         self._mic.stop_listening()
         self._speech.stop()
-        self._conv_btn.configure(text="〜", fg_color=ORANGE, hover_color=ORANGE_HOVER)
-        self._mic_btn.configure(text="🎤", fg_color=ORANGE, hover_color=ORANGE_HOVER)
+        self._conv_btn.configure(text="〜", fg_color=ORANGE,
+                                 hover_color=ORANGE_HOVER)
+        self._mic_btn.configure(text="🎤", fg_color=ORANGE,
+                                hover_color=ORANGE_HOVER)
         self._set_status("")
 
     def _start_conversation_listen(self):
@@ -581,11 +676,6 @@ class ChatView(ctk.CTkFrame):
         )
 
     def _on_conv_transcript(self, text: str):
-        """
-        Called each time a recognition segment arrives in conversation mode.
-        Each new segment resets the 4-second silence timer — just like
-        AskMac's `conversationTranscriptUpdated` function.
-        """
         if not self._is_conversing:
             return
         self._conv_transcript = (
@@ -606,10 +696,6 @@ class ChatView(ctk.CTkFrame):
             self._silence_timer = None
 
     def _on_silence_timeout(self):
-        """
-        Fires after SILENCE_SECONDS of no new transcript segments.
-        Mirrors the Swift silenceTimer firing → sendInConversationMode.
-        """
         self.after(0, self._send_in_conversation_mode)
 
     def _send_in_conversation_mode(self):
@@ -619,7 +705,6 @@ class ChatView(ctk.CTkFrame):
         self._mic.stop_listening()
         self._conv_transcript = ""
         if not text:
-            # Nothing heard — re-arm immediately
             self._set_status("Listening…")
             self._start_conversation_listen()
             return
@@ -627,14 +712,9 @@ class ChatView(ctk.CTkFrame):
         self._dispatch_question(text, speak_reply=True)
 
     def _on_speech_done_in_conv_mode(self):
-        """
-        Called by SpeechPlayer when an utterance finishes naturally.
-        Mirrors the Swift poll on isSpeaking — re-arms the mic.
-        Runs on the speech thread; use after() to hop back to UI thread.
-        """
         if not self._is_conversing:
             return
-        time.sleep(0.8)  # 800 ms pause (matches AskMac)
+        time.sleep(0.8)
         self.after(0, self._rearm_after_speech)
 
     def _rearm_after_speech(self):
@@ -714,18 +794,21 @@ class SettingsSheet(ctk.CTkToplevel):
         pad = {"padx": 20, "pady": 6}
 
         ctk.CTkLabel(self, text="Settings",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(**pad, pady=(16, 6))
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+                         **pad, pady=(16, 6))
 
         # Name
         ctk.CTkLabel(self, text="Your name",
-                     font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", **pad)
+                     font=ctk.CTkFont(size=12), anchor="w").pack(
+                         fill="x", **pad)
         self._name_var = ctk.StringVar(value=self._settings.name)
         ctk.CTkEntry(self, textvariable=self._name_var,
                      font=ctk.CTkFont(size=13)).pack(fill="x", **pad)
 
         # Skill
         ctk.CTkLabel(self, text="Skill level",
-                     font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", **pad)
+                     font=ctk.CTkFont(size=12), anchor="w").pack(
+                         fill="x", **pad)
         self._skill_var = ctk.StringVar(value=self._settings.skill)
         ctk.CTkSegmentedButton(
             self, values=SKILL_OPTIONS, variable=self._skill_var,
@@ -734,7 +817,8 @@ class SettingsSheet(ctk.CTkToplevel):
 
         # Tone
         ctk.CTkLabel(self, text="Tone",
-                     font=ctk.CTkFont(size=12), anchor="w").pack(fill="x", **pad)
+                     font=ctk.CTkFont(size=12), anchor="w").pack(
+                         fill="x", **pad)
         self._tone_var = ctk.StringVar(value=self._settings.tone)
         ctk.CTkOptionMenu(
             self, values=TONE_OPTIONS, variable=self._tone_var,
@@ -751,7 +835,8 @@ class SettingsSheet(ctk.CTkToplevel):
         ).pack(side="left", expand=True, fill="x", padx=(0, 6))
 
         ctk.CTkButton(
-            btn_row, text="Start over", fg_color="gray40", hover_color="gray30",
+            btn_row, text="Start over", fg_color="gray40",
+            hover_color="gray30",
             command=self._reset
         ).pack(side="left", expand=True, fill="x")
 
