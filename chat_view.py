@@ -129,20 +129,25 @@ class ChatView(ctk.CTkFrame):
         )
         # Not packed yet — _set_pending_image shows it, _clear hides it.
 
-        self._preview_thumb = ctk.CTkLabel(self._preview_bar, text="")
+        self._preview_thumb = ctk.CTkLabel(self._preview_bar, text="",
+                                           cursor="hand2")
 
-        # ✕ must be packed BEFORE the text label — side="right" widgets
-        # must reserve their space before side="left" ones claim the rest.
+        # Solid, clearly visible Remove button. A transparent CTkButton can
+        # end up with an unreliable click target, so we give it a real fill.
         ctk.CTkButton(
             self._preview_bar,
-            text="✕", width=26, height=26,
-            font=ctk.CTkFont(size=11),
-            fg_color="transparent",
-            hover_color=("gray75", "gray30"),
+            text="✕  Remove", width=90, height=28,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("gray70", "gray35"),
+            hover_color=("gray60", "gray45"),
+            text_color=("gray10", "white"),
             command=self._clear_pending_image,
         ).pack(side="right", padx=8)
 
         self._preview_thumb.pack(side="left", padx=(10, 4), pady=8)
+        # Clicking the thumbnail also removes the attachment.
+        self._preview_thumb.bind("<Button-1>",
+                                 lambda e: self._clear_pending_image())
 
         ctk.CTkLabel(
             self._preview_bar,
