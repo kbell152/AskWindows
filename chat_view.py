@@ -130,15 +130,9 @@ class ChatView(ctk.CTkFrame):
         # Not packed yet — _set_pending_image shows it, _clear hides it.
 
         self._preview_thumb = ctk.CTkLabel(self._preview_bar, text="")
-        self._preview_thumb.pack(side="left", padx=(10, 4), pady=8)
 
-        ctk.CTkLabel(
-            self._preview_bar,
-            text="Image attached — will send with your next message",
-            font=ctk.CTkFont(size=11),
-            text_color="gray55",
-        ).pack(side="left", padx=4)
-
+        # ✕ must be packed BEFORE the text label — side="right" widgets
+        # must reserve their space before side="left" ones claim the rest.
         ctk.CTkButton(
             self._preview_bar,
             text="✕", width=26, height=26,
@@ -147,6 +141,15 @@ class ChatView(ctk.CTkFrame):
             hover_color=("gray75", "gray30"),
             command=self._clear_pending_image,
         ).pack(side="right", padx=8)
+
+        self._preview_thumb.pack(side="left", padx=(10, 4), pady=8)
+
+        ctk.CTkLabel(
+            self._preview_bar,
+            text="Image attached — will send with your next message",
+            font=ctk.CTkFont(size=11),
+            text_color="gray55",
+        ).pack(side="left", padx=4)
 
         # ── Status label (conversation mode) ────────────────────────
         self._status_label = ctk.CTkLabel(
