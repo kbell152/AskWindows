@@ -26,11 +26,19 @@ a = Analysis(
         # Without this, microphone recognition silently returns nothing —
         # no crash, no error, just empty transcripts every time.
         *collect_data_files('speech_recognition'),
+
+        # tkinterdnd2 ships the tkdnd Tcl extension (DLL + .tcl files).
+        # Without these the drag-and-drop initialisation silently fails.
+        *collect_data_files('tkinterdnd2'),
     ],
     hiddenimports=[
         # pyaudio is not always auto-discovered through static import
         # analysis because of its ctypes/extension-module loading pattern.
         'pyaudio',
+
+        # tkinterdnd2 is imported via a try/except in main.py and chat_view.py
+        # so PyInstaller may not detect it through static analysis.
+        'tkinterdnd2',
 
         # pyttsx3 SAPI5 driver — the Windows TTS backend.
         # espeak is harmless to list (skipped if not installed).
@@ -69,8 +77,6 @@ exe = EXE(
     # appears fine but crashes on launch. The size saving isn't worth it.
     upx=False,
 
-    # console=True during initial validation so any crash prints a traceback
-    # to the terminal window.  Flip to False before zipping for distribution.
     console=False,
 
     disable_windowed_traceback=False,

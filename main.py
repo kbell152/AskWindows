@@ -12,18 +12,35 @@ from user_settings import UserSettings
 from welcome_view import WelcomeView
 from chat_view import ChatView
 
+# tkinterdnd2 adds drag-and-drop to the root Tk window.
+# We mix it into AskWindowsApp so every widget in the app can be
+# a drop target. If the package is missing we fall back gracefully.
+try:
+    from tkinterdnd2 import TkinterDnD as _TkDnD
+    _dnd_base   = _TkDnD.DnDWrapper
+    _dnd_avail  = True
+except ImportError:
+    _dnd_base   = object
+    _dnd_avail  = False
 
-APP_TITLE   = "Ask Windows"
-WIN_WIDTH   = 640
-WIN_HEIGHT  = 700
-MIN_WIDTH   = 520
-MIN_HEIGHT  = 560
+
+APP_TITLE  = "Ask Windows"
+WIN_WIDTH  = 640
+WIN_HEIGHT = 700
+MIN_WIDTH  = 520
+MIN_HEIGHT = 560
 
 
-class AskWindowsApp(ctk.CTk):
+class AskWindowsApp(ctk.CTk, _dnd_base):
 
     def __init__(self):
         super().__init__()
+
+        # Load the tkdnd Tcl extension so every widget in the app
+        # gets drop_target_register / dnd_bind methods.
+        if _dnd_avail:
+            self.TkdndVersion = _TkDnD._require(self)
+
         self._settings = UserSettings()
 
         self.title(APP_TITLE)

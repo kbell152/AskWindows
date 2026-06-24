@@ -10,7 +10,7 @@
 #   - TTS read-aloud per message
 #   - Settings sheet
 #   - Text zoom (Ctrl +/-)
-#   - Image paste (Ctrl-V), file attach (📎), right-click context menu
+#   - Image paste (Ctrl-V), file attach (📎), right-click context menu, drag-and-drop
 #
 
 import base64
@@ -24,6 +24,12 @@ from tkinter import filedialog, messagebox
 from user_settings import UserSettings, SKILL_OPTIONS, TONE_OPTIONS
 from speech import SpeechPlayer
 from mic_input import MicInput
+
+try:
+    from tkinterdnd2 import DND_FILES as _DND_FILES
+    _DND_AVAILABLE_DND = True
+except ImportError:
+    _DND_AVAILABLE_DND = False
 
 try:
     from PIL import Image, ImageGrab
@@ -236,6 +242,16 @@ class ChatView(ctk.CTkFrame):
             "What would you like to know?"
         )
         self._add_message("assistant", greeting)
+
+        # ── Drag-and-drop (whole ChatView is the drop target) ────────
+        if _DND_AVAILABLE_DND:
+            try:
+                self.drop_target_register(_DND_FILES)
+                self.dnd_bind("<<Drop>>",      self._on_drop)
+                self.dnd_bind("<<DragEnter>>", self._on_drag_enter)
+                self.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+            except Exception:
+                pass
 
     # ==================================================================
     # Text zoom
@@ -466,6 +482,76 @@ class ChatView(ctk.CTkFrame):
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    # ==================================================================
+    # Drag-and-drop
+    # ==================================================================
+
+    def _on_drag_enter(self, event):
+        """Highlight the status bar when an image is dragged over the window."""
+        self._set_status("Drop image to attach ↓")
+
+    def _on_drag_leave(self, event):
+        self._set_status("")
+
+    def _on_drop(self, event):
+        """Handle a file drop — attach the first image file found."""
+        self._set_status("")
+        if not _PIL_AVAILABLE:
+            return
+        paths = self._parse_drop_paths(event.data)
+        if not paths:
+            return
+        path = paths[0]
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        image_exts = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+        if ext not in image_exts:
+            messagebox.showinfo(
+                "Drop",
+                "Only image files can be attached this way.\n"
+                "Use the 📎 button for other file types.",
+            )
+            return
+        try:
+            img = Image.open(path)
+            media_type = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png",  "gif": "image/gif",
+                "webp": "image/webp",
+            }.get(ext, "image/png")
+            self._set_pending_image(img, media_type)
+        except Exception as e:
+            messagebox.showerror("Drop", f"Could not open image:\n{e}")
+
+    def _parse_drop_paths(self, data: str) -> list[str]:
+        """
+        Parse tkdnd file-drop data.
+        tkdnd uses Tcl list quoting: paths with spaces are wrapped in {}.
+        Examples:
+          C:/photo.png
+          {C:/my photo.png}
+          {C:/file1.png} {C:/file2.png}
+        """
+        paths: list[str] = []
+        data  = data.strip()
+        i     = 0
+        while i < len(data):
+            if data[i] == "{":
+                end = data.find("}", i)
+                if end == -1:
+                    paths.append(data[i + 1:])
+                    break
+                paths.append(data[i + 1: end])
+                i = end + 1
+            elif data[i] == " ":
+                i += 1
+            else:
+                j = i
+                while j < len(data) and data[j] not in (" ", "{"):
+                    j += 1
+                paths.append(data[i:j])
+                i = j
+        return [p.strip() for p in paths if p.strip()]
 
     def _context_paste(self):
         """

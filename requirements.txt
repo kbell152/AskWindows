@@ -6,6 +6,8 @@ requests>=2.31.0          # HTTP calls to the Cloudflare Worker
 SpeechRecognition>=3.10.0 # Microphone -> text (wraps Google Web Speech)
 pyaudio>=0.2.14           # Microphone audio capture (used by SpeechRecognition)
 pyttsx3>=2.90             # Text-to-speech via Windows SAPI
+Pillow>=10.0.0            # Image paste, file attach, and icon generation
+tkinterdnd2>=0.3.0        # Drag-and-drop support (wraps the tkdnd Tcl extension)
 
 # Optional — only needed if you set USE_OFFLINE = True in mic_input.py:
 # vosk>=0.3.45            # Offline speech recognition
