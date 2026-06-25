@@ -83,9 +83,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-
-    # Uncomment once assets/icon.ico exists (see make_icon.py).
-    # icon='assets/icon.ico',
+    icon='assets/icon.ico',
 )
 
 coll = COLLECT(
