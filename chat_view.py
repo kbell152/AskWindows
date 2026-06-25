@@ -44,6 +44,70 @@ SILENCE_SECONDS = 4.0    # matches AskMac's 4-second silence timer
 IMAGE_MAX_PX    = 1568   # Anthropic recommended max dimension
 
 
+class _Tooltip:
+    """
+    A lightweight hover tooltip for any tkinter/customtkinter widget.
+    Shows a small label after a short delay when the pointer rests on the
+    widget, and hides it on leave or click. tkinter has no built-in tooltip,
+    so this fills the gap without extra dependencies.
+    """
+
+    def __init__(self, widget, text: str, delay_ms: int = 450):
+        self._widget   = widget
+        self._text     = text
+        self._delay    = delay_ms
+        self._after_id = None
+        self._tip      = None
+
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide,     add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self._widget.after(self._delay, self._show)
+
+    def _show(self):
+        if self._tip is not None:
+            return
+        # Position just above the widget, horizontally centred.
+        x = self._widget.winfo_rootx() + self._widget.winfo_width() // 2
+        y = self._widget.winfo_rooty() - 6
+
+        self._tip = tk.Toplevel(self._widget)
+        self._tip.wm_overrideredirect(True)   # no window border/title
+        self._tip.attributes("-topmost", True)
+
+        label = tk.Label(
+            self._tip,
+            text=self._text,
+            background="#1f1f1f",
+            foreground="white",
+            font=("Segoe UI", 9),
+            padx=8, pady=4,
+            relief="solid",
+            borderwidth=1,
+        )
+        label.pack()
+
+        # Render off-screen first to measure, then place centred above.
+        self._tip.update_idletasks()
+        w = self._tip.winfo_width()
+        h = self._tip.winfo_height()
+        self._tip.wm_geometry(f"+{x - w // 2}+{y - h}")
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+    def _cancel(self):
+        if self._after_id is not None:
+            self._widget.after_cancel(self._after_id)
+            self._after_id = None
+
+
 class ChatView(ctk.CTkFrame):
 
     def __init__(self, master, settings: UserSettings, on_reset, **kwargs):
@@ -67,10 +131,9 @@ class ChatView(ctk.CTkFrame):
         # Messages: list of {"role": "user"|"assistant", "content": str}
         self._messages: list[dict] = []
 
-        # Pending attachments (cleared on send). Each item is a dict:
-        #   {"kind": "image"|"file", "name": str, "media_type": str,
-        #    "data_b64": str, "text": str|None, "ctk_thumb": CTkImage|None}
-        self._attachments: list[dict] = []
+        # Pending image attachment (set by paste or file picker, cleared on send)
+        self._pending_image_b64: str | None = None
+        self._pending_media_type: str       = "image/png"
 
         # Text zoom
         self._base_font_size = 13
@@ -112,20 +175,50 @@ class ChatView(ctk.CTkFrame):
         self._chat_frame.pack(fill="both", expand=True, padx=16, pady=10)
         self._chat_frame.columnconfigure(0, weight=1)
 
-        # ── Pending attachments preview strip ─────────────────────────
-        # A transparent host frame is always packed here so the strip can
-        # grow/collapse without needing pack(after=...) references to
-        # CTkScrollableFrame (which maps to an inner canvas, not the outer
-        # packed frame, and rejects such anchors).
+        # ── Pending image preview ─────────────────────────────────────
+        # A transparent host frame is always packed here so the preview bar
+        # can appear/disappear inside it without needing pack(after=...) or
+        # pack(before=...) references to CTkScrollableFrame (which fails
+        # because CTkScrollableFrame maps to an inner canvas widget, not the
+        # outer packed frame).
         self._preview_host = ctk.CTkFrame(self, fg_color="transparent",
                                           height=0)
-        self._preview_host.pack(fill="x", padx=16)
+        self._preview_host.pack(fill="x")
         self._preview_host.pack_propagate(False)   # collapse when empty
 
-        # The strip holds one "chip" per attachment, packed left-to-right.
-        self._preview_strip = ctk.CTkFrame(
-            self._preview_host, fg_color="transparent")
-        # Packed/forgotten dynamically by _render_attachments.
+        self._preview_bar = ctk.CTkFrame(
+            self._preview_host,
+            fg_color=("gray88", "gray18"),
+            corner_radius=8,
+        )
+        # Not packed yet — _set_pending_image shows it, _clear hides it.
+
+        self._preview_thumb = ctk.CTkLabel(self._preview_bar, text="",
+                                           cursor="hand2")
+
+        # Solid, clearly visible Remove button. A transparent CTkButton can
+        # end up with an unreliable click target, so we give it a real fill.
+        ctk.CTkButton(
+            self._preview_bar,
+            text="✕  Remove", width=90, height=28,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("gray70", "gray35"),
+            hover_color=("gray60", "gray45"),
+            text_color=("gray10", "white"),
+            command=self._clear_pending_image,
+        ).pack(side="right", padx=8)
+
+        self._preview_thumb.pack(side="left", padx=(10, 4), pady=8)
+        # Clicking the thumbnail also removes the attachment.
+        self._preview_thumb.bind("<Button-1>",
+                                 lambda e: self._clear_pending_image())
+
+        ctk.CTkLabel(
+            self._preview_bar,
+            text="Image attached — will send with your next message",
+            font=ctk.CTkFont(size=11),
+            text_color="gray55",
+        ).pack(side="left", padx=4)
 
         # ── Status label (conversation mode) ────────────────────────
         self._status_label = ctk.CTkLabel(
@@ -207,6 +300,12 @@ class ChatView(ctk.CTkFrame):
         )
         self._send_btn.pack(side="right", padx=(4, 0))
 
+        # Hover tooltips for the bottom-row buttons.
+        _Tooltip(self._send_btn,   "Send your message")
+        _Tooltip(self._attach_btn, "Attach images or files")
+        _Tooltip(self._mic_btn,    "Speak a single question")
+        _Tooltip(self._conv_btn,   "Hands-free conversation mode")
+
         # Bind Ctrl +/- for zoom
         self.winfo_toplevel().bind("<Control-equal>", lambda e: self._zoom(+0.1))
         self.winfo_toplevel().bind("<Control-plus>",  lambda e: self._zoom(+0.1))
@@ -251,7 +350,7 @@ class ChatView(ctk.CTkFrame):
     # ==================================================================
 
     def _add_message(self, role: str, content: str, speak=False,
-                     attachments: list[dict] | None = None):
+                     image_b64: str | None = None):
         self._messages.append({"role": role, "content": content})
 
         row      = len(self._messages) - 1
@@ -269,29 +368,20 @@ class ChatView(ctk.CTkFrame):
         bubble.grid(row=row * 2, column=0, sticky=anchor,
                     padx=padx, pady=(4, 0))
 
-        # Render attachments above the text (image thumbnails + file rows).
-        if attachments:
-            for att in attachments:
-                if att["kind"] == "image" and _PIL_AVAILABLE and att["data_b64"]:
-                    try:
-                        img = Image.open(
-                            BytesIO(base64.b64decode(att["data_b64"])))
-                        img.thumbnail((220, 180))
-                        ctk_img = ctk.CTkImage(
-                            light_image=img.convert("RGBA"),
-                            size=(img.width, img.height))
-                        img_lbl = ctk.CTkLabel(bubble, text="", image=ctk_img)
-                        img_lbl._ctk_image = ctk_img
-                        img_lbl.pack(padx=12, pady=(8, 2))
-                    except Exception:
-                        pass
-                else:
-                    icon = "📄" if att["media_type"] else "📎"
-                    ctk.CTkLabel(
-                        bubble, text=f"{icon}  {att['name']}",
-                        font=ctk.CTkFont(size=12, slant="italic"),
-                        text_color="gray70" if not is_user else "white",
-                    ).pack(padx=12, pady=(8, 0), anchor="w")
+        # Image thumbnail (shown above text when a photo was attached)
+        if image_b64 and _PIL_AVAILABLE:
+            try:
+                img = Image.open(BytesIO(base64.b64decode(image_b64)))
+                img.thumbnail((220, 180))
+                ctk_img = ctk.CTkImage(
+                    light_image=img.convert("RGBA"),
+                    size=(img.width, img.height),
+                )
+                img_lbl = ctk.CTkLabel(bubble, text="", image=ctk_img)
+                img_lbl._ctk_image = ctk_img   # prevent GC
+                img_lbl.pack(padx=12, pady=(8, 2))
+            except Exception:
+                pass
 
         text_lbl = ctk.CTkLabel(
             bubble,
@@ -332,211 +422,90 @@ class ChatView(ctk.CTkFrame):
             self._speech.speak(content)
 
     # ==================================================================
-    # Attachments (images + files; paste, file picker, drag-and-drop)
+    # Image attachment (Ctrl-V paste + file picker)
     # ==================================================================
-
-    # File extensions whose contents we can read as text and send inline.
-    _TEXT_EXTS = {
-        "txt", "md", "markdown", "csv", "tsv", "json", "log", "ini", "cfg",
-        "conf", "yaml", "yml", "xml", "html", "htm", "css", "js", "ts",
-        "jsx", "tsx", "py", "rb", "go", "rs", "java", "c", "h", "cpp", "hpp",
-        "cs", "php", "sh", "bat", "ps1", "sql", "r", "swift", "kt", "toml",
-    }
-    _IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
-    _MAX_TEXT_BYTES = 200_000   # cap inline text files at ~200 KB
 
     def _on_paste(self, event):
         """
-        Ctrl-V in the input entry. If the clipboard holds an image, attach it
-        and consume the event. If it holds text, fall through to normal paste.
+        Fired when the user presses Ctrl-V in the input entry.
+        If the clipboard contains an image, attach it and consume the event.
+        If it contains text, fall through so the Entry handles it normally.
         """
         if not _PIL_AVAILABLE:
             return None
         try:
             img = ImageGrab.grabclipboard()
             if isinstance(img, Image.Image):
-                self._add_image_attachment(img, "image/png", "Pasted image")
-                return "break"
+                self._set_pending_image(img, "image/png")
+                return "break"   # consume — don't also paste text
         except Exception:
             pass
-        return None
+        return None              # no image — let Entry paste text as usual
 
     def _attach_file(self):
-        """Open a file picker (multi-select) and attach everything chosen."""
-        paths = filedialog.askopenfilenames(
-            title="Attach images or files",
+        """Open a file picker and attach the chosen image."""
+        if not _PIL_AVAILABLE:
+            messagebox.showerror(
+                "Attachment",
+                "Image support requires Pillow. Please reinstall the app.")
+            return
+        path = filedialog.askopenfilename(
+            title="Attach an image",
             filetypes=[
-                ("All supported", "*.png *.jpg *.jpeg *.gif *.bmp *.webp "
-                                  "*.pdf *.txt *.md *.csv *.json *.log "
-                                  "*.py *.js *.html *.css *.xml *.yaml *.yml"),
                 ("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-                ("PDF", "*.pdf"),
-                ("Text & code", "*.txt *.md *.csv *.json *.log *.py *.js "
-                                "*.html *.css *.xml *.yaml *.yml"),
                 ("All files", "*.*"),
             ],
         )
-        for path in paths:
-            self._attach_path(path)
-
-    def _attach_path(self, path: str):
-        """Route a file path to the right attachment handler by extension."""
-        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        if not path:
+            return
         try:
-            if ext in self._IMAGE_EXTS and _PIL_AVAILABLE:
-                img = Image.open(path)
-                media_type = {
-                    "jpg": "image/jpeg", "jpeg": "image/jpeg",
-                    "png": "image/png",  "gif": "image/gif",
-                    "webp": "image/webp",
-                }.get(ext, "image/png")   # BMP → PNG
-                name = path.replace("\\", "/").rsplit("/", 1)[-1]
-                self._add_image_attachment(img, media_type, name)
-            else:
-                self._add_file_attachment(path, ext)
+            img = Image.open(path)
+            ext = path.rsplit(".", 1)[-1].lower()
+            media_type = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png",  "gif": "image/gif",
+                "webp": "image/webp",
+            }.get(ext, "image/png")   # BMP → PNG (Anthropic doesn't support BMP)
+            self._set_pending_image(img, media_type)
         except Exception as e:
-            messagebox.showerror("Attachment", f"Could not attach file:\n{e}")
+            messagebox.showerror("Attachment", f"Could not open image:\n{e}")
 
-    # ---- builders -----------------------------------------------------
-
-    def _add_image_attachment(self, img: "Image.Image",
-                              media_type: str, name: str):
-        """Resize, encode, and add an image to the pending list."""
+    def _set_pending_image(self, img: "Image.Image", media_type: str):
+        """Resize, encode to base64, and show the preview bar."""
+        # Downscale if larger than Anthropic's recommended maximum.
         w, h = img.size
         if max(w, h) > IMAGE_MAX_PX:
             scale = IMAGE_MAX_PX / max(w, h)
             img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
+        # Encode to base64.
         buf = BytesIO()
         fmt = "JPEG" if media_type == "image/jpeg" else "PNG"
         img.convert("RGB" if fmt == "JPEG" else "RGBA").save(buf, format=fmt)
-        data_b64 = base64.b64encode(buf.getvalue()).decode()
+        self._pending_image_b64  = base64.b64encode(buf.getvalue()).decode()
+        self._pending_media_type = media_type
 
+        # Show thumbnail in preview bar.
         thumb = img.copy()
-        thumb.thumbnail((56, 56))
-        ctk_thumb = ctk.CTkImage(light_image=thumb.convert("RGBA"),
-                                 size=(thumb.width, thumb.height))
-
-        self._attachments.append({
-            "kind": "image", "name": name, "media_type": media_type,
-            "data_b64": data_b64, "text": None, "ctk_thumb": ctk_thumb,
-        })
-        self._render_attachments()
-
-    def _add_file_attachment(self, path: str, ext: str):
-        """Add a non-image file. PDFs and text files get real content;
-        other types are noted by name only."""
-        name = path.replace("\\", "/").rsplit("/", 1)[-1]
-
-        if ext == "pdf":
-            with open(path, "rb") as f:
-                data_b64 = base64.b64encode(f.read()).decode()
-            self._attachments.append({
-                "kind": "file", "name": name,
-                "media_type": "application/pdf",
-                "data_b64": data_b64, "text": None, "ctk_thumb": None,
-            })
-
-        elif ext in self._TEXT_EXTS:
-            import os
-            if os.path.getsize(path) > self._MAX_TEXT_BYTES:
-                messagebox.showinfo(
-                    "Attachment",
-                    f"{name} is too large to attach as text "
-                    f"(over {self._MAX_TEXT_BYTES // 1000} KB).")
-                return
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                body = f.read()
-            self._attachments.append({
-                "kind": "file", "name": name, "media_type": "text/plain",
-                "data_b64": None,
-                "text": f"[Attached file: {name}]\n\n{body}",
-                "ctk_thumb": None,
-            })
-
-        else:
-            # Unsupported binary type — attach by name only so the model
-            # at least knows it was provided, and tell the user.
-            self._attachments.append({
-                "kind": "file", "name": name, "media_type": "",
-                "data_b64": None,
-                "text": f"[The user attached a file named '{name}'. "
-                        f"Its contents can't be read directly.]",
-                "ctk_thumb": None,
-            })
-            messagebox.showinfo(
-                "Attachment",
-                f"{name} will be sent by name only — this file type can't be "
-                "read directly, so I won't be able to see its contents.")
-
-        self._render_attachments()
-
-    # ---- preview strip rendering -------------------------------------
-
-    def _render_attachments(self):
-        """Rebuild the preview strip from the current attachments list."""
-        for child in self._preview_strip.winfo_children():
-            child.destroy()
-
-        if not self._attachments:
-            self._preview_strip.pack_forget()
-            self._preview_host.configure(height=0)
-            return
-
-        for idx, att in enumerate(self._attachments):
-            self._build_chip(idx, att)
-
-        self._preview_strip.pack(fill="x", pady=6)
-        self._preview_host.configure(height=84)
-
-    def _build_chip(self, idx: int, att: dict):
-        """One attachment chip with an ✕ badge in the upper-left corner."""
-        chip = ctk.CTkFrame(
-            self._preview_strip,
-            fg_color=("gray85", "gray22"),
-            corner_radius=8,
-            width=64, height=64,
+        thumb.thumbnail((60, 60))
+        ctk_thumb = ctk.CTkImage(
+            light_image=thumb.convert("RGBA"),
+            size=(thumb.width, thumb.height),
         )
-        chip.pack(side="left", padx=4, pady=2)
-        chip.pack_propagate(False)
+        self._preview_thumb.configure(image=ctk_thumb, text="")
+        self._preview_thumb._ctk_image = ctk_thumb   # prevent GC
 
-        if att["kind"] == "image" and att["ctk_thumb"] is not None:
-            inner = ctk.CTkLabel(chip, text="", image=att["ctk_thumb"])
-            inner._ctk_image = att["ctk_thumb"]
-            inner.place(relx=0.5, rely=0.5, anchor="center")
-        else:
-            # File chip: icon + short name.
-            icon = "📄" if att["media_type"] else "📎"
-            short = att["name"]
-            if len(short) > 9:
-                short = short[:8] + "…"
-            ctk.CTkLabel(
-                chip, text=f"{icon}\n{short}",
-                font=ctk.CTkFont(size=10), justify="center",
-            ).place(relx=0.5, rely=0.5, anchor="center")
+        # Show the preview bar inside its host frame and expand the host.
+        self._preview_bar.pack(fill="x", padx=4, pady=4)
+        self._preview_host.configure(height=68)
+        self._preview_host.pack_propagate(False)
 
-        # ✕ badge — upper-left corner, overlaid via place().
-        badge = ctk.CTkButton(
-            chip, text="✕", width=18, height=18,
-            corner_radius=9,
-            font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color=("gray50", "gray60"),
-            hover_color=("red", "red"),
-            text_color="white",
-            command=lambda i=idx: self._remove_attachment(i),
-        )
-        badge.place(relx=0.0, rely=0.0, x=-2, y=-2, anchor="nw")
-
-    def _remove_attachment(self, idx: int):
-        """Remove one attachment by index and re-render the strip."""
-        if 0 <= idx < len(self._attachments):
-            self._attachments.pop(idx)
-        self._render_attachments()
-
-    def _clear_attachments(self):
-        """Remove all pending attachments."""
-        self._attachments = []
-        self._render_attachments()
+    def _clear_pending_image(self):
+        """Remove the pending image and collapse the preview host."""
+        self._pending_image_b64  = None
+        self._pending_media_type = "image/png"
+        self._preview_bar.pack_forget()
+        self._preview_host.configure(height=0)
 
     # ==================================================================
     # Right-click context menu on the input entry
@@ -597,18 +566,40 @@ class ChatView(ctk.CTkFrame):
     # ==================================================================
 
     def _on_drag_enter(self, event):
-        """Hint in the status bar when files are dragged over the window."""
-        self._set_status("Drop to attach ↓")
+        """Highlight the status bar when an image is dragged over the window."""
+        self._set_status("Drop image to attach ↓")
 
     def _on_drag_leave(self, event):
         self._set_status("")
 
     def _on_drop(self, event):
-        """Handle a file drop — attach every dropped file (images and files)."""
+        """Handle a file drop — attach the first image file found."""
         self._set_status("")
+        if not _PIL_AVAILABLE:
+            return
         paths = self._parse_drop_paths(event.data)
-        for path in paths:
-            self._attach_path(path)
+        if not paths:
+            return
+        path = paths[0]
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+        image_exts = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+        if ext not in image_exts:
+            messagebox.showinfo(
+                "Drop",
+                "Only image files can be attached this way.\n"
+                "Use the 📎 button for other file types.",
+            )
+            return
+        try:
+            img = Image.open(path)
+            media_type = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "png": "image/png",  "gif": "image/gif",
+                "webp": "image/webp",
+            }.get(ext, "image/png")
+            self._set_pending_image(img, media_type)
+        except Exception as e:
+            messagebox.showerror("Drop", f"Could not open image:\n{e}")
 
     def _parse_drop_paths(self, data: str) -> list[str]:
         """
@@ -649,8 +640,7 @@ class ChatView(ctk.CTkFrame):
             try:
                 img = ImageGrab.grabclipboard()
                 if isinstance(img, Image.Image):
-                    self._add_image_attachment(img, "image/png",
-                                               "Pasted image")
+                    self._set_pending_image(img, "image/png")
                     return
             except Exception:
                 pass
@@ -665,76 +655,39 @@ class ChatView(ctk.CTkFrame):
     # ==================================================================
 
     def _send_text(self):
-        text        = self._input_var.get().strip()
-        attachments = list(self._attachments)   # snapshot
+        text       = self._input_var.get().strip()
+        image_b64  = self._pending_image_b64
+        media_type = self._pending_media_type
 
-        if not text and not attachments:
+        if not text and not image_b64:
             return
 
-        # Default caption when only attachments are sent with no question.
-        if not text and attachments:
-            has_image = any(a["kind"] == "image" for a in attachments)
-            text = ("What do you see in this image?" if has_image
-                    else "Can you help me with this file?")
+        # Default caption when the user sends only an image.
+        if not text and image_b64:
+            text = "What do you see in this image?"
 
         self._input_var.set("")
-        self._clear_attachments()
-        self._dispatch_question(text, attachments=attachments)
+        self._clear_pending_image()
+        self._dispatch_question(text, image_b64=image_b64,
+                                media_type=media_type)
 
     def _dispatch_question(self, text: str, speak_reply=False,
-                            attachments: list[dict] | None = None):
-        attachments = attachments or []
-        # Build a caption for the chat bubble noting any non-image files.
-        self._add_message("user", text, attachments=attachments)
+                            image_b64: str | None = None,
+                            media_type: str = "image/png"):
+        self._add_message("user", text, image_b64=image_b64)
         self._set_status("Thinking…" if self._is_conversing else "")
         self._entry.configure(state="disabled")
         self._send_btn.configure(state="disabled")
 
         threading.Thread(
             target=self._fetch_answer,
-            args=(text, speak_reply, attachments),
+            args=(text, speak_reply, image_b64, media_type),
             daemon=True,
         ).start()
 
-    def _build_content_blocks(self, question: str,
-                              attachments: list[dict]) -> list[dict]:
-        """
-        Assemble an Anthropic-style content array from the question text and
-        all pending attachments:
-          - images   → image blocks (base64)
-          - PDFs     → document blocks (base64)
-          - text/code→ text blocks with a filename header
-          - other    → text block noting the filename only
-        """
-        blocks: list[dict] = []
-        for att in attachments:
-            if att["kind"] == "image":
-                blocks.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": att["media_type"],
-                        "data": att["data_b64"],
-                    },
-                })
-            elif att["media_type"] == "application/pdf":
-                blocks.append({
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": att["data_b64"],
-                    },
-                })
-            elif att.get("text"):
-                blocks.append({"type": "text", "text": att["text"]})
-        # Question text goes last so it follows the attachments.
-        blocks.append({"type": "text", "text": question})
-        return blocks
-
     def _fetch_answer(self, question: str, speak_reply: bool,
-                      attachments: list[dict] | None = None):
-        attachments = attachments or []
+                      image_b64: str | None = None,
+                      media_type: str = "image/png"):
         try:
             recent = self._messages[-20:]
             while recent and recent[0]["role"] != "user":
@@ -743,8 +696,20 @@ class ChatView(ctk.CTkFrame):
             messages = []
             for i, m in enumerate(recent):
                 is_last = (i == len(recent) - 1)
-                if is_last and m["role"] == "user" and attachments:
-                    content = self._build_content_blocks(question, attachments)
+                # For the final user turn, attach the image as a content array
+                # (Anthropic vision format). Older turns stay as plain strings.
+                if is_last and m["role"] == "user" and image_b64:
+                    content = [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_b64,
+                            },
+                        },
+                        {"type": "text", "text": question},
+                    ]
                 else:
                     content = m["content"]
                 messages.append({"role": m["role"], "content": content})
