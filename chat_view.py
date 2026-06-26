@@ -42,6 +42,7 @@ ORANGE_HOVER    = "#CC6600"
 SERVER_URL      = "https://askmac-server.morning-poetry-8fbb.workers.dev"
 SILENCE_SECONDS = 4.0    # matches AskMac's 4-second silence timer
 IMAGE_MAX_PX    = 1568   # Anthropic recommended max dimension
+APP_VERSION     = "1.0"  # bump on each release; shown in the header
 
 
 class _Tooltip:
@@ -159,6 +160,13 @@ class ChatView(ctk.CTkFrame):
             text="Ask Windows",
             font=ctk.CTkFont(size=17, weight="bold"),
         ).pack(side="left")
+
+        ctk.CTkLabel(
+            topbar,
+            text=f"v{APP_VERSION}",
+            font=ctk.CTkFont(size=12),
+            text_color="gray55",
+        ).pack(side="left", padx=(6, 0), pady=(4, 0))
 
         ctk.CTkButton(
             topbar,
