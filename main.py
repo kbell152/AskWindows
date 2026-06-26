@@ -45,31 +45,21 @@ class AskWindowsApp(ctk.CTk, _dnd_base):
 
         self.title(APP_TITLE)
 
-        # Size and place the window so it always fits the usable screen area
-        # (the screen minus the taskbar), regardless of resolution or DPI
-        # scaling. winfo_screenheight() reports the FULL physical height and
-        # ignores the taskbar, which is why the window could previously hang
-        # off the bottom — so we measure the actual work area instead.
-        self.update_idletasks()
-        try:
-            # Tk knows the maximised inner size, which equals the work area
-            # (screen minus taskbar). This is the reliable usable height.
-            work_w = self.winfo_screenwidth()
-            work_h = self.winfo_height() if self.state() == "zoomed" else 0
-            if not work_h:
-                # Query the work area via the window manager's maxsize, which
-                # Tk derives from the usable desktop rectangle.
-                work_w, work_h = self.maxsize()
-        except Exception:
-            work_w, work_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        # Size and place the window so it always fits the usable screen.
+        # winfo_screenheight() reports the FULL physical height and ignores
+        # the taskbar, which is why the window could hang off the bottom.
+        # We subtract a fixed allowance for the taskbar + title bar instead,
+        # which is simple and reliable across DPI settings.
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
 
-        # Leave a small margin so the title bar and a bottom gap stay visible.
-        usable_h = max(MIN_HEIGHT, work_h - 60)
+        TASKBAR_AND_CHROME = 120   # taskbar + title bar + small margin
+        usable_h = max(MIN_HEIGHT, screen_h - TASKBAR_AND_CHROME)
         win_h = min(WIN_HEIGHT, usable_h)
         win_w = WIN_WIDTH
 
         # Centre horizontally; pin near the top so the bottom never clips.
-        x = max(0, (work_w - win_w) // 2)
+        x = max(0, (screen_w - win_w) // 2)
         y = 20
         self.geometry(f"{win_w}x{win_h}+{x}+{y}")
         self.minsize(MIN_WIDTH, MIN_HEIGHT)
