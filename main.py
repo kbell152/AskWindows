@@ -45,11 +45,33 @@ class AskWindowsApp(ctk.CTk, _dnd_base):
 
         self.title(APP_TITLE)
 
-        # Clamp window height to 85 % of the screen so it never overflows
-        # on low-resolution displays or displays with high DPI scaling.
-        screen_h = self.winfo_screenheight()
-        win_h = min(WIN_HEIGHT, max(MIN_HEIGHT, int(screen_h * 0.85)))
-        self.geometry(f"{WIN_WIDTH}x{win_h}")
+        # Size and place the window so it always fits the usable screen area
+        # (the screen minus the taskbar), regardless of resolution or DPI
+        # scaling. winfo_screenheight() reports the FULL physical height and
+        # ignores the taskbar, which is why the window could previously hang
+        # off the bottom — so we measure the actual work area instead.
+        self.update_idletasks()
+        try:
+            # Tk knows the maximised inner size, which equals the work area
+            # (screen minus taskbar). This is the reliable usable height.
+            work_w = self.winfo_screenwidth()
+            work_h = self.winfo_height() if self.state() == "zoomed" else 0
+            if not work_h:
+                # Query the work area via the window manager's maxsize, which
+                # Tk derives from the usable desktop rectangle.
+                work_w, work_h = self.maxsize()
+        except Exception:
+            work_w, work_h = self.winfo_screenwidth(), self.winfo_screenheight()
+
+        # Leave a small margin so the title bar and a bottom gap stay visible.
+        usable_h = max(MIN_HEIGHT, work_h - 60)
+        win_h = min(WIN_HEIGHT, usable_h)
+        win_w = WIN_WIDTH
+
+        # Centre horizontally; pin near the top so the bottom never clips.
+        x = max(0, (work_w - win_w) // 2)
+        y = 20
+        self.geometry(f"{win_w}x{win_h}+{x}+{y}")
         self.minsize(MIN_WIDTH, MIN_HEIGHT)
 
         # Use system default appearance (respects Windows dark/light mode).
