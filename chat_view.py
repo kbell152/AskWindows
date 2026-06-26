@@ -117,6 +117,10 @@ class ChatView(ctk.CTkFrame):
         self._speech     = SpeechPlayer()
         self._mic        = MicInput()
 
+        # Reusable HTTP session — keeps the TLS connection alive between
+        # questions so each request skips a fresh handshake. Small win, but free.
+        self._session = requests.Session()
+
         # Conversation mode state (mirrors Swift state machine)
         self._is_conversing      = False
         self._conv_muted         = False
@@ -679,11 +683,60 @@ class ChatView(ctk.CTkFrame):
         self._entry.configure(state="disabled")
         self._send_btn.configure(state="disabled")
 
+        # Show an animated "Thinking…" bubble immediately so the app feels
+        # responsive while the (non-streaming) request is in flight.
+        self._show_thinking_bubble()
+
         threading.Thread(
             target=self._fetch_answer,
             args=(text, speak_reply, image_b64, media_type),
             daemon=True,
         ).start()
+
+    # ------------------------------------------------------------------
+    # "Thinking…" placeholder bubble (perceived-latency feedback)
+    # ------------------------------------------------------------------
+
+    def _show_thinking_bubble(self):
+        """Display a temporary assistant bubble with animated dots."""
+        self._hide_thinking_bubble()   # safety: never stack two
+
+        row = len(self._messages) * 2   # next free grid row, not a real message
+        self._thinking_bubble = ctk.CTkFrame(
+            self._chat_frame, fg_color=("gray85", "gray20"), corner_radius=12)
+        self._thinking_bubble.grid(row=row, column=0, sticky="w",
+                                   padx=(8, 60), pady=(4, 0))
+        self._thinking_label = ctk.CTkLabel(
+            self._thinking_bubble, text="Thinking",
+            font=ctk.CTkFont(size=self._base_font_size),
+            text_color="gray60")
+        self._thinking_label.pack(padx=12, pady=8)
+
+        self._thinking_dots = 0
+        self._animate_thinking()
+
+        self._chat_frame._parent_canvas.after(
+            50, lambda: self._chat_frame._parent_canvas.yview_moveto(1.0))
+
+    def _animate_thinking(self):
+        """Cycle the trailing dots: 'Thinking' → '...' → repeat."""
+        if not getattr(self, "_thinking_label", None):
+            return
+        self._thinking_dots = (self._thinking_dots + 1) % 4
+        self._thinking_label.configure(text="Thinking" + "." * self._thinking_dots)
+        self._thinking_anim_id = self.after(400, self._animate_thinking)
+
+    def _hide_thinking_bubble(self):
+        """Remove the placeholder bubble and stop its animation."""
+        anim_id = getattr(self, "_thinking_anim_id", None)
+        if anim_id is not None:
+            self.after_cancel(anim_id)
+            self._thinking_anim_id = None
+        bubble = getattr(self, "_thinking_bubble", None)
+        if bubble is not None:
+            bubble.destroy()
+            self._thinking_bubble = None
+            self._thinking_label = None
 
     def _fetch_answer(self, question: str, speak_reply: bool,
                       image_b64: str | None = None,
@@ -726,7 +779,7 @@ class ChatView(ctk.CTkFrame):
                     "inputDevice": self._settings.input_device,
                 },
             }
-            resp = requests.post(SERVER_URL, json=payload, timeout=30)
+            resp = self._session.post(SERVER_URL, json=payload, timeout=30)
             data = resp.json()
             if "reply" in data:
                 self.after(0, self._on_answer, data["reply"], speak_reply)
@@ -740,6 +793,7 @@ class ChatView(ctk.CTkFrame):
             self.after(0, self._on_answer_error, str(e))
 
     def _on_answer(self, reply: str, speak: bool):
+        self._hide_thinking_bubble()
         self._entry.configure(state="normal")
         self._send_btn.configure(state="normal")
         self._add_message("assistant", reply, speak=speak)
@@ -750,6 +804,7 @@ class ChatView(ctk.CTkFrame):
             self._start_conversation_listen()
 
     def _on_answer_error(self, message: str):
+        self._hide_thinking_bubble()
         self._entry.configure(state="normal")
         self._send_btn.configure(state="normal")
         self._add_message("assistant", f"⚠ {message}")
