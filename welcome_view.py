@@ -7,9 +7,12 @@
 #  Saves to UserSettings and calls on_complete() when done.
 #
 
+import threading
+import requests
 import customtkinter as ctk
 from user_settings import UserSettings, SKILL_OPTIONS, TONE_OPTIONS, INPUT_OPTIONS, INPUT_LABELS
 from system_info import SystemInfo
+from chat_view import SERVER_URL
 
 
 ORANGE = "#FF8C00"
@@ -66,9 +69,12 @@ class WelcomeView(ctk.CTkFrame):
 
         self._code_error = ctk.CTkLabel(
             inner, text="Please enter the invite code you were given.",
-            font=ctk.CTkFont(size=11), text_color="red"
+            font=ctk.CTkFont(size=11), text_color="red",
+            wraplength=380, justify="left",
         )
-        # not gridded yet — shown on error
+        # Reserve the row directly under the invite entry so the message
+        # appears where the user is looking. Gridded on demand in _show_code_error.
+        self._code_error_row = row; row += 1
 
         # ── Name ────────────────────────────────────────────────────────
         self._section_label(inner, row, "What should I call you?"); row += 1
@@ -151,7 +157,7 @@ class WelcomeView(ctk.CTkFrame):
         self._os_menu.grid(row=row, column=0, sticky="w", pady=(4, 14)); row += 1
 
         # ── Continue button ─────────────────────────────────────────────
-        ctk.CTkButton(
+        self._continue_btn = ctk.CTkButton(
             inner,
             text="Continue",
             command=self._save_and_continue,
@@ -160,7 +166,8 @@ class WelcomeView(ctk.CTkFrame):
             hover_color="#CC6600",
             height=38,
             width=380,
-        ).grid(row=row, column=0, sticky="w", pady=(10, 0)); row += 1
+        )
+        self._continue_btn.grid(row=row, column=0, sticky="w", pady=(10, 0)); row += 1
 
     # ------------------------------------------------------------------
     # Helpers
@@ -186,10 +193,60 @@ class WelcomeView(ctk.CTkFrame):
     def _save_and_continue(self):
         code = self._invite_var.get().strip()
         if not code:
-            self._code_error.grid(column=0, sticky="w", pady=(0, 8))
+            self._show_code_error("Please enter the invite code you were given.")
             return
         self._code_error.grid_remove()
 
+        # Validate the invite code with the server up front, so the user is
+        # told immediately if it's wrong — rather than only after they've
+        # gone through setup and asked their first question. The check runs
+        # on a background thread so the UI stays responsive.
+        self._set_checking(True)
+        threading.Thread(
+            target=self._check_code, args=(code,), daemon=True
+        ).start()
+
+    def _check_code(self, code):
+        """Ask the server whether the invite code is valid (runs off-thread)."""
+        try:
+            resp = requests.post(
+                SERVER_URL,
+                json={
+                    "inviteCode":  code,
+                    "platform":    "windows",
+                    "messages":    [],
+                    "userContext": {},
+                },
+                # (connect, read) timeouts: fail fast if the server can't be
+                # reached, but still allow a moment for it to respond.
+                timeout=(3.05, 5),
+            )
+            # The server checks the invite code before anything else and
+            # returns 401 when it's invalid. Any other status means the code
+            # itself passed, so we let the user continue.
+            if resp.status_code == 401:
+                self.after(0, self._on_code_invalid)
+            else:
+                self.after(0, self._on_code_valid, code)
+        except requests.exceptions.RequestException:
+            self.after(0, self._on_code_network_error)
+
+    def _on_code_valid(self, code):
+        self._set_checking(False)
+        self._commit(code)
+
+    def _on_code_invalid(self):
+        self._set_checking(False)
+        self._show_code_error(
+            "That invite code isn't valid. Please check it and try again.")
+
+    def _on_code_network_error(self):
+        self._set_checking(False)
+        self._show_code_error(
+            "Couldn't check your invite code. Please check your internet "
+            "connection and try again.")
+
+    def _commit(self, code):
         s = self._settings
         s.invite_code  = code
         s.name         = self._name_var.get().strip()
@@ -203,3 +260,15 @@ class WelcomeView(ctk.CTkFrame):
             s.os_version = self._manual_os_var.get()
 
         self._on_complete()
+
+    def _set_checking(self, checking: bool):
+        """Toggle the Continue button between its normal and 'checking' state."""
+        if checking:
+            self._continue_btn.configure(state="disabled", text="Checking…")
+        else:
+            self._continue_btn.configure(state="normal", text="Continue")
+
+    def _show_code_error(self, text: str):
+        self._code_error.configure(text=text)
+        self._code_error.grid(row=self._code_error_row, column=0,
+                              sticky="w", pady=(0, 8))
