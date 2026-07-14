@@ -174,7 +174,11 @@ class ChatView(ctk.CTkFrame):
             width=36, height=30,
             font=ctk.CTkFont(size=16),
             fg_color="transparent",
-            hover_color="gray20",
+            # Theme-aware so the gear is visible on both the light and dark
+            # header. Without an explicit text_color it defaults to white and
+            # disappears against the light-mode header.
+            text_color=("gray20", "gray90"),
+            hover_color=("gray80", "gray30"),
             command=self._open_settings,
         ).pack(side="right")
 
@@ -1022,7 +1026,7 @@ class SettingsSheet(ctk.CTkToplevel):
 
         ctk.CTkLabel(self, text="Settings",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(
-                         **pad, pady=(16, 6))
+                         padx=pad["padx"], pady=(16, 6))
 
         # Name
         ctk.CTkLabel(self, text="Your name",
